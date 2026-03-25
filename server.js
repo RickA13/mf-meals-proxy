@@ -13,8 +13,26 @@ const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
 app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
 
-// Helper: format date as M/D/YYYY
-const fmtDate = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
+// Helper: get delivery Sunday for a charge date using Fri-Thu window
+// Stripe window: Friday 9 days before delivery through Thursday 3 days before delivery
+const getDeliverySunday = (chargeDate) => {
+  const d = new Date(chargeDate * 1000);
+  const day = d.getDay(); // 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+  
+  // Days until next Sunday from charge date
+  let daysToSun;
+  if(day === 5) daysToSun = 9;      // Friday → +9 days = next Sunday + 2
+  else if(day === 6) daysToSun = 8; // Saturday → +8
+  else if(day === 0) daysToSun = 7; // Sunday → +7
+  else if(day === 1) daysToSun = 6; // Monday → +6
+  else if(day === 2) daysToSun = 5; // Tuesday → +5
+  else if(day === 3) daysToSun = 4; // Wednesday → +4
+  else daysToSun = 3;               // Thursday → +3 (end of window, same delivery)
+
+  const sun = new Date(d);
+  sun.setDate(d.getDate() + daysToSun);
+  return fmtDate(sun);
+};
 
 // Stripe — return daily totals, optional since timestamp
 app.get("/stripe/daily", async (req, res) => {
@@ -37,7 +55,8 @@ app.get("/stripe/daily", async (req, res) => {
     paid.forEach(c => {
       const d = new Date(c.created * 1000);
       const dateStr = fmtDate(d);
-      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created };
+      const deliverySunday = getDeliverySunday(c.created);
+      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created, deliverySunday };
       byDay[dateStr].total += c.amount / 100;
     });
     const daily = Object.values(byDay).sort((a, b) => a.created - b.created);
