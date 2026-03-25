@@ -59,6 +59,10 @@ app.get("/stripe/daily", async (req, res) => {
       const deliverySunday = getDeliverySunday(c.created);
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created, deliverySunday };
       byDay[dateStr].total += c.amount / 100;
+      // Subtract any refunds on this charge
+      if (c.amount_refunded > 0) {
+        byDay[dateStr].total -= c.amount_refunded / 100;
+      }
     });
     const daily = Object.values(byDay).sort((a, b) => a.created - b.created);
     res.json({ daily });
