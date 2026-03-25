@@ -41,7 +41,7 @@ app.get("/stripe/daily", async (req, res) => {
     const since = req.query.since ? parseInt(req.query.since) : null;
     let all = [], hasMore = true, startingAfter = null;
     while (hasMore) {
-      let url = "https://api.stripe.com/v1/charges?limit=100";
+      let url = "https://api.stripe.com/v1/charges?limit=100&expand[]=data.refunds";
       if (since) url += `&created[gte]=${since}`;
       if (startingAfter) url += `&starting_after=${startingAfter}`;
       const r = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_KEY}` } });
@@ -52,18 +52,20 @@ app.get("/stripe/daily", async (req, res) => {
       if (data.data.length > 0) startingAfter = data.data[data.data.length - 1].id;
     }
     const paid = all.filter(c => c.status === "succeeded" && c.amount > 0);
+    let totalRefunds = 0;
     const byDay = {};
     paid.forEach(c => {
       const d = new Date(c.created * 1000);
       const dateStr = fmtDate(d);
       const deliverySunday = getDeliverySunday(c.created);
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created, deliverySunday };
-      // Use net amount after any refunds (amount - amount_refunded)
-      const net = (c.amount - (c.amount_refunded || 0)) / 100;
+      const refunded = c.amount_refunded || 0;
+      totalRefunds += refunded / 100;
+      const net = (c.amount - refunded) / 100;
       byDay[dateStr].total += net;
     });
     const daily = Object.values(byDay).sort((a, b) => a.created - b.created);
-    res.json({ daily });
+    res.json({ daily, totalRefunds, totalCharges: paid.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
