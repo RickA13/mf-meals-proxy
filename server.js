@@ -16,12 +16,14 @@ app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
 // Helper: format date as M/D/YYYY
 const fmtDate = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
 
-// Stripe — return daily totals grouped by date
+// Stripe — return daily totals, optional since timestamp
 app.get("/stripe/daily", async (req, res) => {
   try {
+    const since = req.query.since ? parseInt(req.query.since) : null;
     let all = [], hasMore = true, startingAfter = null;
     while (hasMore) {
       let url = "https://api.stripe.com/v1/charges?limit=100";
+      if (since) url += `&created[gte]=${since}`;
       if (startingAfter) url += `&starting_after=${startingAfter}`;
       const r = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_KEY}` } });
       const data = await r.json();
@@ -30,11 +32,7 @@ app.get("/stripe/daily", async (req, res) => {
       hasMore = data.has_more;
       if (data.data.length > 0) startingAfter = data.data[data.data.length - 1].id;
     }
-
-    // Filter successful charges only
     const paid = all.filter(c => c.status === "succeeded" && c.amount > 0);
-
-    // Group by date — sum daily totals
     const byDay = {};
     paid.forEach(c => {
       const d = new Date(c.created * 1000);
@@ -42,8 +40,6 @@ app.get("/stripe/daily", async (req, res) => {
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created };
       byDay[dateStr].total += c.amount / 100;
     });
-
-    // Return sorted daily totals
     const daily = Object.values(byDay).sort((a, b) => a.created - b.created);
     res.json({ daily });
   } catch (e) {
