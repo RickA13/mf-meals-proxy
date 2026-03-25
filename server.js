@@ -11,30 +11,31 @@ const SQUARE_TOKEN = process.env.SQUARE_TOKEN;
 const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
-app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
+// Format date as M/D/YYYY
+const fmtDate = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
 
-// Helper: get delivery Sunday for a charge date using Fri-Thu window
-// Stripe window: Friday 9 days before delivery through Thursday 3 days before delivery
-const getDeliverySunday = (chargeDate) => {
-  const d = new Date(chargeDate * 1000);
-  const day = d.getDay(); // 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-  
-  // Days until next Sunday from charge date
+// Get delivery Sunday for a Stripe charge using Fri-Thu window
+// Fri-Thu before delivery Sunday = that week's Stripe window
+// Fri = 9 days before Sunday, Thu = 3 days before Sunday
+const getDeliverySunday = (created) => {
+  const d = new Date(created * 1000);
+  const day = d.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
   let daysToSun;
-  if(day === 5) daysToSun = 9;      // Friday → +9 days = next Sunday + 2
-  else if(day === 6) daysToSun = 8; // Saturday → +8
-  else if(day === 0) daysToSun = 7; // Sunday → +7
-  else if(day === 1) daysToSun = 6; // Monday → +6
-  else if(day === 2) daysToSun = 5; // Tuesday → +5
-  else if(day === 3) daysToSun = 4; // Wednesday → +4
-  else daysToSun = 3;               // Thursday → +3 (end of window, same delivery)
-
+  if (day === 5) daysToSun = 9;      // Friday
+  else if (day === 6) daysToSun = 8; // Saturday
+  else if (day === 0) daysToSun = 7; // Sunday
+  else if (day === 1) daysToSun = 6; // Monday
+  else if (day === 2) daysToSun = 5; // Tuesday
+  else if (day === 3) daysToSun = 4; // Wednesday
+  else daysToSun = 3;                // Thursday
   const sun = new Date(d);
   sun.setDate(d.getDate() + daysToSun);
   return fmtDate(sun);
 };
 
-// Stripe — return daily totals, optional since timestamp
+app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
+
+// Stripe — daily totals with correct delivery Sunday
 app.get("/stripe/daily", async (req, res) => {
   try {
     const since = req.query.since ? parseInt(req.query.since) : null;
@@ -66,7 +67,7 @@ app.get("/stripe/daily", async (req, res) => {
   }
 });
 
-// Square — return daily totals
+// Square — daily totals
 app.get("/square/daily", async (req, res) => {
   try {
     let all = [], cursor = null;
@@ -82,7 +83,6 @@ app.get("/square/daily", async (req, res) => {
       if (!data.cursor) break;
       cursor = data.cursor;
     }
-
     const paid = all.filter(p => p.status === "COMPLETED" && p.amount_money?.amount > 0);
     const byDay = {};
     paid.forEach(p => {
@@ -91,7 +91,6 @@ app.get("/square/daily", async (req, res) => {
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0 };
       byDay[dateStr].total += p.amount_money.amount / 100;
     });
-
     const daily = Object.values(byDay).sort((a, b) => new Date(a.date) - new Date(b.date));
     res.json({ daily });
   } catch (e) {
@@ -99,7 +98,7 @@ app.get("/square/daily", async (req, res) => {
   }
 });
 
-// Shopify — return daily totals
+// Shopify — daily totals
 app.get("/shopify/daily", async (req, res) => {
   try {
     let all = [], page_info = null;
@@ -116,7 +115,6 @@ app.get("/shopify/daily", async (req, res) => {
         if (!page_info) break;
       } else break;
     }
-
     const byDay = {};
     all.forEach(o => {
       const d = new Date(o.created_at);
@@ -124,7 +122,6 @@ app.get("/shopify/daily", async (req, res) => {
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0 };
       byDay[dateStr].total += parseFloat(o.total_price || 0);
     });
-
     const daily = Object.values(byDay).sort((a, b) => new Date(a.date) - new Date(b.date));
     res.json({ daily });
   } catch (e) {
