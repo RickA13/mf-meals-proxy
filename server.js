@@ -35,13 +35,13 @@ const getDeliverySunday = (created) => {
 
 app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
 
-// Stripe — daily totals with correct delivery Sunday
+// Stripe — daily net payouts using balance transactions (after fees)
 app.get("/stripe/daily", async (req, res) => {
   try {
     const since = req.query.since ? parseInt(req.query.since) : null;
     let all = [], hasMore = true, startingAfter = null;
     while (hasMore) {
-      let url = "https://api.stripe.com/v1/charges?limit=100&expand[]=data.refunds";
+      let url = "https://api.stripe.com/v1/balance_transactions?limit=100&type=charge";
       if (since) url += `&created[gte]=${since}`;
       if (startingAfter) url += `&starting_after=${startingAfter}`;
       const r = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_KEY}` } });
@@ -51,21 +51,46 @@ app.get("/stripe/daily", async (req, res) => {
       hasMore = data.has_more;
       if (data.data.length > 0) startingAfter = data.data[data.data.length - 1].id;
     }
-    const paid = all.filter(c => c.status === "succeeded" && c.amount > 0);
-    let totalRefunds = 0;
+
+    // Group by date using net amount (after Stripe fees)
     const byDay = {};
-    paid.forEach(c => {
-      const d = new Date(c.created * 1000);
+    all.forEach(txn => {
+      const d = new Date(txn.created * 1000);
       const dateStr = fmtDate(d);
-      const deliverySunday = getDeliverySunday(c.created);
-      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: c.created, deliverySunday };
-      const refunded = c.amount_refunded || 0;
-      totalRefunds += refunded / 100;
-      const net = (c.amount - refunded) / 100;
-      byDay[dateStr].total += net;
+      const deliverySunday = getDeliverySunday(txn.created);
+      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: txn.created, deliverySunday };
+      // net = amount after Stripe fees, in cents → convert to dollars
+      byDay[dateStr].total += txn.net / 100;
     });
-    const daily = Object.values(byDay).sort((a, b) => a.created - b.created);
-    res.json({ daily, totalRefunds, totalCharges: paid.length });
+
+    // Also pull refunds and subtract from the day they occurred
+    let refundAll = [], refundHasMore = true, refundStartingAfter = null;
+    while (refundHasMore) {
+      let url = "https://api.stripe.com/v1/balance_transactions?limit=100&type=refund";
+      if (since) url += `&created[gte]=${since}`;
+      if (refundStartingAfter) url += `&starting_after=${refundStartingAfter}`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${STRIPE_KEY}` } });
+      const data = await r.json();
+      if (data.error) break;
+      refundAll = [...refundAll, ...data.data];
+      refundHasMore = data.has_more;
+      if (data.data.length > 0) refundStartingAfter = data.data[data.data.length - 1].id;
+    }
+
+    refundAll.forEach(txn => {
+      const d = new Date(txn.created * 1000);
+      const dateStr = fmtDate(d);
+      const deliverySunday = getDeliverySunday(txn.created);
+      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: txn.created, deliverySunday };
+      // net for refunds is negative, so adding it subtracts from the day
+      byDay[dateStr].total += txn.net / 100;
+    });
+
+    const daily = Object.values(byDay)
+      .filter(d => d.total > 0)
+      .sort((a, b) => a.created - b.created);
+
+    res.json({ daily, totalDays: daily.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
