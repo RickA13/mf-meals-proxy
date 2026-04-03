@@ -8,26 +8,23 @@ app.use(express.json());
 
 const STRIPE_KEY = process.env.STRIPE_KEY;
 const SQUARE_TOKEN = process.env.SQUARE_TOKEN;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
-// Format date as M/D/YYYY
 const fmtDate = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
 
-// Get delivery Sunday for a Stripe charge using Fri-Thu window
-// Fri-Thu before delivery Sunday = that week's Stripe window
-// Fri = 9 days before Sunday, Thu = 3 days before Sunday
 const getDeliverySunday = (created) => {
   const d = new Date(created * 1000);
-  const day = d.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
+  const day = d.getDay();
   let daysToSun;
-  if (day === 5) daysToSun = 9;      // Friday
-  else if (day === 6) daysToSun = 8; // Saturday
-  else if (day === 0) daysToSun = 7; // Sunday
-  else if (day === 1) daysToSun = 6; // Monday
-  else if (day === 2) daysToSun = 5; // Tuesday
-  else if (day === 3) daysToSun = 4; // Wednesday
-  else daysToSun = 3;                // Thursday
+  if (day === 5) daysToSun = 9;
+  else if (day === 6) daysToSun = 8;
+  else if (day === 0) daysToSun = 7;
+  else if (day === 1) daysToSun = 6;
+  else if (day === 2) daysToSun = 5;
+  else if (day === 3) daysToSun = 4;
+  else daysToSun = 3;
   const sun = new Date(d);
   sun.setDate(d.getDate() + daysToSun);
   return fmtDate(sun);
@@ -35,7 +32,7 @@ const getDeliverySunday = (created) => {
 
 app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
 
-// Stripe — daily net payouts using balance transactions (after fees)
+// Stripe — daily net totals (after fees)
 app.get("/stripe/daily", async (req, res) => {
   try {
     const since = req.query.since ? parseInt(req.query.since) : null;
@@ -51,19 +48,14 @@ app.get("/stripe/daily", async (req, res) => {
       hasMore = data.has_more;
       if (data.data.length > 0) startingAfter = data.data[data.data.length - 1].id;
     }
-
-    // Group by date using net amount (after Stripe fees)
     const byDay = {};
     all.forEach(txn => {
       const d = new Date(txn.created * 1000);
       const dateStr = fmtDate(d);
       const deliverySunday = getDeliverySunday(txn.created);
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: txn.created, deliverySunday };
-      // net = amount after Stripe fees, in cents → convert to dollars
       byDay[dateStr].total += txn.net / 100;
     });
-
-    // Also pull refunds and subtract from the day they occurred
     let refundAll = [], refundHasMore = true, refundStartingAfter = null;
     while (refundHasMore) {
       let url = "https://api.stripe.com/v1/balance_transactions?limit=100&type=refund";
@@ -76,27 +68,23 @@ app.get("/stripe/daily", async (req, res) => {
       refundHasMore = data.has_more;
       if (data.data.length > 0) refundStartingAfter = data.data[data.data.length - 1].id;
     }
-
     refundAll.forEach(txn => {
       const d = new Date(txn.created * 1000);
       const dateStr = fmtDate(d);
       const deliverySunday = getDeliverySunday(txn.created);
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0, created: txn.created, deliverySunday };
-      // net for refunds is negative, so adding it subtracts from the day
       byDay[dateStr].total += txn.net / 100;
     });
-
     const daily = Object.values(byDay)
       .filter(d => d.total > 0)
       .sort((a, b) => a.created - b.created);
-
     res.json({ daily, totalDays: daily.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// Square — daily totals
+// Square — daily totals (gross for now)
 app.get("/square/daily", async (req, res) => {
   try {
     let all = [], cursor = null;
@@ -127,16 +115,17 @@ app.get("/square/daily", async (req, res) => {
   }
 });
 
-// Shopify — daily totals
+// Shopify — daily totals (net after fees)
 app.get("/shopify/daily", async (req, res) => {
   try {
+    const auth = Buffer.from(`${SHOPIFY_API_KEY}:${SHOPIFY_API_SECRET}`).toString("base64");
     let all = [], page_info = null;
     while (true) {
-      let url = `https://${SHOPIFY_STORE}/admin/api/2024-01/orders.json?status=paid&limit=250&financial_status=paid`;
+      let url = `https://${SHOPIFY_STORE}/admin/api/2024-01/orders.json?financial_status=paid&limit=250`;
       if (page_info) url += `&page_info=${page_info}`;
-      const r = await fetch(url, { headers: { "X-Shopify-Access-Token": SHOPIFY_TOKEN } });
+      const r = await fetch(url, { headers: { "Authorization": `Basic ${auth}` } });
       const data = await r.json();
-      if (data.errors) return res.status(400).json(data);
+      if (data.errors) return res.status(400).json({ errors: data.errors });
       all = [...all, ...(data.orders || [])];
       const link = r.headers.get("link");
       if (link && link.includes('rel="next"')) {
@@ -149,9 +138,11 @@ app.get("/shopify/daily", async (req, res) => {
       const d = new Date(o.created_at);
       const dateStr = fmtDate(d);
       if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0 };
-      byDay[dateStr].total += parseFloat(o.total_price || 0);
+      byDay[dateStr].total += parseFloat(o.subtotal_price || 0);
     });
-    const daily = Object.values(byDay).sort((a, b) => new Date(a.date) - new Date(b.date));
+    const daily = Object.values(byDay)
+      .filter(d => d.total > 0)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
     res.json({ daily });
   } catch (e) {
     res.status(500).json({ error: e.message });
