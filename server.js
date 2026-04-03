@@ -8,8 +8,7 @@ app.use(express.json());
 
 const STRIPE_KEY = process.env.STRIPE_KEY;
 const SQUARE_TOKEN = process.env.SQUARE_TOKEN;
-const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
-const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
+const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
 const fmtDate = d => `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`;
@@ -32,7 +31,6 @@ const getDeliverySunday = (created) => {
 
 app.get("/", (req, res) => res.json({ status: "MF Meals Proxy running" }));
 
-// Stripe — daily net totals (after fees)
 app.get("/stripe/daily", async (req, res) => {
   try {
     const since = req.query.since ? parseInt(req.query.since) : null;
@@ -84,7 +82,6 @@ app.get("/stripe/daily", async (req, res) => {
   }
 });
 
-// Square — daily totals (gross for now)
 app.get("/square/daily", async (req, res) => {
   try {
     let all = [], cursor = null;
@@ -109,52 +106,6 @@ app.get("/square/daily", async (req, res) => {
       byDay[dateStr].total += p.amount_money.amount / 100;
     });
     const daily = Object.values(byDay).sort((a, b) => new Date(a.date) - new Date(b.date));
-    res.json({ daily });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Shopify — auto-refreshing token, daily totals
-app.get("/shopify/daily", async (req, res) => {
-  try {
-    // Step 1: Get fresh access token
-    const tokenRes = await fetch(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `grant_type=client_credentials&client_id=${SHOPIFY_API_KEY}&client_secret=${SHOPIFY_API_SECRET}`
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) return res.status(401).json({ error: "Could not get Shopify token", detail: tokenData });
-    const token = tokenData.access_token;
-
-    // Step 2: Fetch orders using fresh token
-    let all = [], page_info = null;
-    while (true) {
-      let url = `https://${SHOPIFY_STORE}/admin/api/2024-01/orders.json?financial_status=paid&limit=250`;
-      if (page_info) url += `&page_info=${page_info}`;
-      const r = await fetch(url, { headers: { "X-Shopify-Access-Token": token } });
-      const data = await r.json();
-      if (data.errors) return res.status(400).json({ errors: data.errors });
-      all = [...all, ...(data.orders || [])];
-      const link = r.headers.get("link");
-      if (link && link.includes('rel="next"')) {
-        page_info = link.match(/page_info=([^&>]+).*rel="next"/)?.[1];
-        if (!page_info) break;
-      } else break;
-    }
-
-    // Step 3: Group by day
-    const byDay = {};
-    all.forEach(o => {
-      const d = new Date(o.created_at);
-      const dateStr = fmtDate(d);
-      if (!byDay[dateStr]) byDay[dateStr] = { date: dateStr, total: 0 };
-      byDay[dateStr].total += parseFloat(o.subtotal_price || 0);
-    });
-    const daily = Object.values(byDay)
-      .filter(d => d.total > 0)
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
     res.json({ daily });
   } catch (e) {
     res.status(500).json({ error: e.message });
