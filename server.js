@@ -115,15 +115,25 @@ app.get("/square/daily", async (req, res) => {
   }
 });
 
-// Shopify — daily totals (net after fees)
+// Shopify — auto-refreshing token, daily totals
 app.get("/shopify/daily", async (req, res) => {
   try {
-    const auth = Buffer.from(`${SHOPIFY_API_KEY}:${SHOPIFY_API_SECRET}`).toString("base64");
+    // Step 1: Get fresh access token
+    const tokenRes = await fetch(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `grant_type=client_credentials&client_id=${SHOPIFY_API_KEY}&client_secret=${SHOPIFY_API_SECRET}`
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) return res.status(401).json({ error: "Could not get Shopify token", detail: tokenData });
+    const token = tokenData.access_token;
+
+    // Step 2: Fetch orders using fresh token
     let all = [], page_info = null;
     while (true) {
       let url = `https://${SHOPIFY_STORE}/admin/api/2024-01/orders.json?financial_status=paid&limit=250`;
       if (page_info) url += `&page_info=${page_info}`;
-      const r = await fetch(url, { headers: { "Authorization": `Basic ${auth}` } });
+      const r = await fetch(url, { headers: { "X-Shopify-Access-Token": token } });
       const data = await r.json();
       if (data.errors) return res.status(400).json({ errors: data.errors });
       all = [...all, ...(data.orders || [])];
@@ -133,6 +143,8 @@ app.get("/shopify/daily", async (req, res) => {
         if (!page_info) break;
       } else break;
     }
+
+    // Step 3: Group by day
     const byDay = {};
     all.forEach(o => {
       const d = new Date(o.created_at);
